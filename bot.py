@@ -92,6 +92,47 @@ async def send_long(update: Update, text: str):
 task_history: list[dict] = []   # {time, prompt, result}
 active_tasks: dict[int, asyncio.Task] = {}
 
+# ── Мониторинг сайта ─────────────────────────────────────────────────────────
+
+monitor_enabled  = True        # включён по умолчанию
+monitor_interval = 5 * 60      # проверка каждые 5 минут
+site_was_up      = True        # последнее известное состояние сайта
+monitor_task: asyncio.Task | None = None
+
+async def check_site_up() -> tuple[bool, str]:
+    """Возвращает (доступен, описание)."""
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            f'curl -o /dev/null -s -w "%{{http_code}}" --max-time 10 {SITE_URL}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        code = stdout.decode().strip()
+        up = code.startswith("2") or code.startswith("3")
+        return up, f"HTTP {code}"
+    except Exception as e:
+        return False, str(e)
+
+async def monitor_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Задача для job_queue: проверяет сайт и шлёт уведомление при смене статуса."""
+    global site_was_up
+    if not monitor_enabled:
+        return
+    up, desc = await check_site_up()
+    if up and not site_was_up:
+        site_was_up = True
+        await ctx.bot.send_message(
+            chat_id=ALLOWED_USER_ID,
+            text=f"✅ Сайт снова работает!\n{SITE_URL}\n{desc}",
+        )
+    elif not up and site_was_up:
+        site_was_up = False
+        await ctx.bot.send_message(
+            chat_id=ALLOWED_USER_ID,
+            text=f"🚨 Сайт не отвечает!\n{SITE_URL}\n{desc}\n\nПроверяю каждые {monitor_interval//60} мин.",
+        )
+
 # ════════════════════════════════════════════════════════════════════════════
 #  КОМАНДЫ
 # ════════════════════════════════════════════════════════════════════════════
@@ -117,7 +158,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*Сайт*\n"
         "/sitecheck — проверить, что сайт живой\n"
         "/deploy — задеплоить последний коммит\n\n"
-        "*Задачи*\n"
+        "/monitor — статус мониторинга сайта\n"
+        "/monitor on/off — включить/выключить\n\n"
         "/history — история последних задач\n"
         "/cancel — отменить текущую задачу\n"
         "/status — состояние бота\n"
@@ -277,7 +319,28 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{i}. {status} [{ts}] {prompt}")
     await update.message.reply_text("*Последние задачи*\n" + "\n".join(lines), parse_mode="Markdown")
 
-# /cancel
+# /monitor on|off|status
+async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not auth(update): return await deny(update)
+    global monitor_enabled
+    arg = ctx.args[0].lower() if ctx.args else "status"
+    if arg == "on":
+        monitor_enabled = True
+        await update.message.reply_text(f"✅ Мониторинг включён. Проверка каждые {monitor_interval//60} мин.")
+    elif arg == "off":
+        monitor_enabled = False
+        await update.message.reply_text("⏸ Мониторинг выключен.")
+    else:
+        up, desc = await check_site_up()
+        icon = "✅" if up else "🚨"
+        state = "включён" if monitor_enabled else "выключен"
+        await update.message.reply_text(
+            f"{icon} Сайт: {desc}\n"
+            f"Мониторинг: {state}\n"
+            f"Интервал: каждые {monitor_interval//60} мин\n"
+            f"URL: {SITE_URL}"
+        )
+
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not auth(update): return await deny(update)
     uid  = update.effective_user.id
@@ -332,7 +395,10 @@ def main():
             print("Ошибка: ALLOWED_USER_ID не задан в .env")
             return
 
-        app = Application.builder().token(BOT_TOKEN).build()
+        async def on_startup(app):
+            app.job_queue.run_repeating(monitor_job, interval=monitor_interval, first=10)
+
+        app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
         app.add_handler(CommandHandler("start",      cmd_start))
         app.add_handler(CommandHandler("status",     cmd_status))
@@ -347,6 +413,7 @@ def main():
         app.add_handler(CommandHandler("sitecheck",  cmd_sitecheck))
         app.add_handler(CommandHandler("deploy",     cmd_deploy))
         app.add_handler(CommandHandler("history",    cmd_history))
+        app.add_handler(CommandHandler("monitor",    cmd_monitor))
         app.add_handler(CommandHandler("cancel",     cmd_cancel))
         app.add_handler(CallbackQueryHandler(cb_deploy, pattern="^deploy_"))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
