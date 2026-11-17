@@ -1,11 +1,38 @@
 # Telegram-бот для удалённого управления Claude Code агентами
 import os
+import sys
 import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 load_dotenv()
+
+# Защита от запуска нескольких копий: создаём lock-файл
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.lock")
+
+def acquire_lock():
+    """Создаёт lock-файл с PID. Если файл уже есть и процесс жив — выходим."""
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f:
+                old_pid = int(f.read().strip())
+            # Проверяем, жив ли процесс
+            import psutil
+            if psutil.pid_exists(old_pid):
+                print(f"Бот уже запущен (PID={old_pid}). Выход.")
+                sys.exit(0)
+        except Exception:
+            pass  # Файл повреждён — перезапишем
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def release_lock():
+    """Удаляет lock-файл при остановке."""
+    try:
+        os.remove(LOCK_FILE)
+    except Exception:
+        pass
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
@@ -120,22 +147,26 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main():
-    if not BOT_TOKEN:
-        print("Ошибка: BOT_TOKEN не задан в .env файле")
-        return
-    if not ALLOWED_USER_ID:
-        print("Ошибка: ALLOWED_USER_ID не задан в .env файле")
-        return
+    acquire_lock()
+    try:
+        if not BOT_TOKEN:
+            print("Ошибка: BOT_TOKEN не задан в .env файле")
+            return
+        if not ALLOWED_USER_ID:
+            print("Ошибка: ALLOWED_USER_ID не задан в .env файле")
+            return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+        app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("status", status))
+        app.add_handler(CommandHandler("cancel", cancel))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Бот запущен. Нажми Ctrl+C для остановки.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+        print("Бот запущен. Нажми Ctrl+C для остановки.")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":
