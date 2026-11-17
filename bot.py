@@ -1,7 +1,6 @@
 # Telegram-бот для удалённого управления Claude Code агентами
 import os
 import asyncio
-import subprocess
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -42,8 +41,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def run_claude(prompt: str) -> str:
     """Запускает claude CLI с заданным промптом и возвращает результат."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            CLAUDE_PATH, "--print", prompt,
+        # На Windows .cmd файлы нужно запускать через shell
+        # Экранируем промпт для безопасной передачи в командную строку
+        safe_prompt = prompt.replace('"', '\\"')
+        command = f'"{CLAUDE_PATH}" --print "{safe_prompt}"'
+        proc = await asyncio.create_subprocess_shell(
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=WORK_DIR
